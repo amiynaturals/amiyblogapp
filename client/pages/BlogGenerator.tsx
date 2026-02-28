@@ -1,0 +1,1349 @@
+import { useState, useRef } from "react";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { SECTION_RULES, getSectionsByOrder } from "@shared/section-rules";
+import { GenerateHTMLRequest, GenerateHTMLResponse } from "@shared/api";
+import { toast } from "sonner";
+import { Copy, Download, Zap, Upload, Edit2, Trash2, Settings } from "lucide-react";
+import * as mammoth from "mammoth";
+import { RelatedProductsField } from "@/components/blog/RelatedProductsField";
+
+interface Product {
+  id: string;
+  title: string;
+  handle: string;
+  image?: string;
+}
+
+export default function BlogGenerator() {
+  const [documentContent, setDocumentContent] = useState("");
+  const [html, setHtml] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+  const [isPublishing, setIsPublishing] = useState(false);
+  const [metadata, setMetadata] = useState<any>(null);
+  const [activeTab, setActiveTab] = useState<"editor" | "preview">("editor");
+  const [showPublishModal, setShowPublishModal] = useState(false);
+  const [publishData, setPublishData] = useState({
+    title: "",
+    author: "",
+    tags: "",
+    publicationDate: new Date().toISOString().split("T")[0],
+  });
+  const [images, setImages] = useState<Array<{ keyword: string; sectionId: string }>>([]);
+  const [uploadingImages, setUploadingImages] = useState<Record<string, boolean>>({});
+  const [imageUrls, setImageUrls] = useState<Record<string, string>>({});
+  const [featuredImage, setFeaturedImage] = useState<{ url: string; uploading: boolean } | null>(null);
+  const [relatedProducts, setRelatedProducts] = useState<Product[]>([]);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const featuredImageInputRef = useRef<HTMLInputElement>(null);
+  const imageFileInputsRef = useRef<Record<string, HTMLInputElement>>({});
+
+  const sections = getSectionsByOrder();
+
+  /**
+   * Validate Shopify connection before opening publish modal
+   */
+  const validateShopifyConnection = async (): Promise<boolean> => {
+    try {
+      const response = await fetch("/api/validate-shopify");
+      const data = await response.json();
+
+      if (!response.ok || !data.success) {
+        const errorMsg = data.error || "Shopify validation failed";
+        const suggestion = data.suggestion ? ` ${data.suggestion}` : "";
+        toast.error(`${errorMsg}${suggestion}. Check settings for more details.`);
+        return false;
+      }
+
+      return true;
+    } catch (error) {
+      console.error("Error validating Shopify:", error);
+      toast.error("Unable to validate Shopify connection. Please try again.");
+      return false;
+    }
+  };
+
+  /**
+   * Show Shopify diagnostic information
+   */
+  const showDiagnostics = async () => {
+    try {
+      const response = await fetch("/api/diagnose-shopify");
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error("Server returned error:", response.status, errorText);
+
+        try {
+          const errorData = JSON.parse(errorText);
+          const details = errorData.details || errorData.error || "Unknown error";
+          throw new Error(`Server error (${response.status}): ${details}`);
+        } catch {
+          throw new Error(`Server error (${response.status}): ${errorText || "No response"}`);
+        }
+      }
+
+      const data = await response.json();
+
+      // Open diagnostic info in a new window or show in a modal
+      const diagnosticText = `
+SHOPIFY CONFIGURATION DIAGNOSTIC
+================================
+
+Status: ${data.status}
+
+Environment Variables:
+${Object.entries(data.environment)
+  .map(([key, value]) => `  ${key}: ${value}`)
+  .join("\n")}
+
+Connection Test:
+${data.connection ? `  Status: ${data.connection.status}` : "  Status: Not tested"}
+${data.connection?.shopName ? `  Shop: ${data.connection.shopName}` : ""}
+
+Issues Found:
+${data.issues.length > 0 ? data.issues.map((i: string) => `  • ${i}`).join("\n") : "  ✓ No issues found"}
+
+Timestamp: ${data.timestamp}
+      `;
+
+      // Use browser's alert for simplicity, or copy to clipboard
+      const blob = new Blob([diagnosticText], { type: "text/plain" });
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "shopify-diagnostics.txt";
+      a.click();
+      window.URL.revokeObjectURL(url);
+
+      toast.success("Diagnostic report downloaded. Check your downloads folder.");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error("Error fetching diagnostics:", message);
+      toast.error(message || "Failed to get diagnostic information");
+    }
+  };
+
+  /**
+   * Handle opening publish modal
+   */
+  const handleOpenPublishModal = async () => {
+    const isValid = await validateShopifyConnection();
+    if (isValid) {
+      setShowPublishModal(true);
+    }
+  };
+
+  /**
+   * Handle document file upload
+   */
+  const handleDocumentUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    // Allow text-based and Word formats
+    const allowedExtensions = [".txt", ".md", ".docx"];
+    const fileExtension = "." + file.name.split(".").pop()?.toLowerCase();
+
+    if (!allowedExtensions.includes(fileExtension)) {
+      toast.error(
+        `Unsupported file format: ${fileExtension}. Please use .txt, .md, or .docx files.`
+      );
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
+      return;
+    }
+
+    try {
+      let content: string;
+
+      if (fileExtension === ".docx") {
+        // Parse DOCX file using mammoth, preserving links
+        const arrayBuffer = await file.arrayBuffer();
+        const result = await mammoth.convertToHtml({ arrayBuffer });
+
+        // Convert HTML to text while preserving links in markdown format
+        content = htmlToTextWithLinks(result.value);
+
+        if (result.messages.length > 0) {
+          console.warn("DOCX parsing warnings:", result.messages);
+        }
+      } else {
+        // Read text file as plain text
+        content = await file.text();
+      }
+
+      setDocumentContent(content);
+      toast.success(`Document "${file.name}" loaded successfully`);
+    } catch (error) {
+      console.error("Error reading file:", error);
+      toast.error(
+        `Failed to read file: ${error instanceof Error ? error.message : "Unknown error"}`
+      );
+    }
+
+    // Reset input so same file can be uploaded again
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+  };
+
+  /**
+   * Handle paste events to detect and convert pasted HTML content
+   */
+  const handlePaste = async (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const clipboardData = event.clipboardData;
+
+    // Check if HTML data is available in the clipboard
+    if (clipboardData && clipboardData.types.includes("text/html")) {
+      event.preventDefault();
+
+      const htmlContent = clipboardData.getData("text/html");
+      const plainText = clipboardData.getData("text/plain");
+
+      // If HTML content is available, process it with htmlToTextWithLinks
+      if (htmlContent && htmlContent.length > plainText.length) {
+        try {
+          const convertedContent = htmlToTextWithLinks(htmlContent);
+
+          // Get cursor position
+          const textarea = textareaRef.current;
+          if (textarea) {
+            const start = textarea.selectionStart;
+            const end = textarea.selectionEnd;
+            const before = documentContent.substring(0, start);
+            const after = documentContent.substring(end);
+
+            const newContent = before + convertedContent + after;
+            setDocumentContent(newContent);
+
+            // Move cursor after pasted content
+            setTimeout(() => {
+              textarea.focus();
+              textarea.selectionStart = start + convertedContent.length;
+              textarea.selectionEnd = start + convertedContent.length;
+            }, 0);
+          }
+
+          toast.success("Pasted content converted with links preserved!");
+        } catch (error) {
+          console.error("Error processing pasted HTML:", error);
+          // Fall back to plain text paste
+          const textarea = textareaRef.current;
+          if (textarea) {
+            const start = textarea.selectionStart;
+            const end = textarea.selectionEnd;
+            const before = documentContent.substring(0, start);
+            const after = documentContent.substring(end);
+            setDocumentContent(before + plainText + after);
+          }
+        }
+      } else {
+        // No HTML available, use plain text
+        const textarea = textareaRef.current;
+        if (textarea) {
+          const start = textarea.selectionStart;
+          const end = textarea.selectionEnd;
+          const before = documentContent.substring(0, start);
+          const after = documentContent.substring(end);
+          setDocumentContent(before + plainText + after);
+        }
+      }
+    }
+  };
+
+  /**
+   * Convert HTML to plain text while preserving links in markdown format and proper spacing
+   */
+  const htmlToTextWithLinks = (html: string): string => {
+    // Create a temporary DOM element to parse HTML
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, "text/html");
+
+    const processNode = (node: Node, isInList: boolean = false): string => {
+      if (node.nodeType === Node.TEXT_NODE) {
+        const text = node.textContent || "";
+        return text;
+      }
+
+      if (node.nodeType === Node.ELEMENT_NODE) {
+        const element = node as Element;
+        const tagName = element.tagName.toLowerCase();
+
+        // Handle links: preserve as [text](url)
+        if (tagName === "a") {
+          const linkText = Array.from(element.childNodes)
+            .map(n => processNode(n, isInList))
+            .join("")
+            .trim();
+          const href = element.getAttribute("href") || "";
+          return href && linkText ? `[${linkText}](${href})` : linkText;
+        }
+
+        // Handle headings
+        if (["h1", "h2", "h3", "h4", "h5", "h6"].includes(tagName)) {
+          const content = Array.from(element.childNodes)
+            .map(n => processNode(n, isInList))
+            .join("")
+            .trim();
+          return content ? content + "\n\n" : "";
+        }
+
+        // Handle unordered lists
+        if (tagName === "ul") {
+          const items = Array.from(element.childNodes)
+            .filter(node => node.nodeType === Node.ELEMENT_NODE && (node as Element).tagName.toLowerCase() === "li")
+            .map(li => {
+              const text = Array.from((li as Element).childNodes)
+                .map(n => processNode(n, true))
+                .join("")
+                .trim();
+              return text ? "- " + text : "";
+            })
+            .filter(item => item.length > 0)
+            .join("\n");
+          return items ? items + "\n\n" : "";
+        }
+
+        // Handle ordered lists
+        if (tagName === "ol") {
+          const items = Array.from(element.childNodes)
+            .filter(node => node.nodeType === Node.ELEMENT_NODE && (node as Element).tagName.toLowerCase() === "li")
+            .map((li, idx) => {
+              const text = Array.from((li as Element).childNodes)
+                .map(n => processNode(n, true))
+                .join("")
+                .trim();
+              return text ? `${idx + 1}. ${text}` : "";
+            })
+            .filter(item => item.length > 0)
+            .join("\n");
+          return items ? items + "\n\n" : "";
+        }
+
+        // Handle list items when inside lists
+        if (tagName === "li" && isInList) {
+          return Array.from(element.childNodes)
+            .map(n => processNode(n, true))
+            .join("")
+            .trim();
+        }
+
+        // Handle paragraphs and other block elements
+        if (["p", "div", "section", "article", "blockquote"].includes(tagName)) {
+          const content = Array.from(element.childNodes)
+            .map(n => processNode(n, isInList))
+            .join("")
+            .trim();
+          return content ? content + "\n\n" : "";
+        }
+
+        // Handle table
+        if (tagName === "table") {
+          const rows = Array.from(element.querySelectorAll("tr"))
+            .map(tr => {
+              const cells = Array.from(tr.querySelectorAll("td, th"))
+                .map(cell => Array.from(cell.childNodes)
+                  .map(n => processNode(n, isInList))
+                  .join("")
+                  .trim()
+                );
+              return cells.join(" | ");
+            })
+            .filter(row => row.length > 0);
+          return rows.join("\n") + "\n\n";
+        }
+
+        // For other elements, process children recursively
+        return Array.from(element.childNodes)
+          .map(n => processNode(n, isInList))
+          .join("");
+      }
+
+      return "";
+    };
+
+    let text = processNode(doc.body);
+
+    // Clean up excessive whitespace while preserving double newlines for spacing
+    const lines = text.split("\n");
+    const result: string[] = [];
+    let emptyCount = 0;
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed.length === 0) {
+        emptyCount++;
+        // Only keep up to 2 consecutive empty lines
+        if (emptyCount <= 2) {
+          result.push("");
+        }
+      } else {
+        emptyCount = 0;
+        result.push(trimmed);
+      }
+    }
+
+    return result
+      .join("\n")
+      .trim();
+  };
+
+  /**
+   * Insert section marker at cursor position
+   */
+  const insertSection = (sectionId: string) => {
+    if (!textareaRef.current) return;
+
+    const textarea = textareaRef.current;
+    const start = textarea.selectionStart;
+    const end = textarea.selectionEnd;
+    const before = documentContent.substring(0, start);
+    const after = documentContent.substring(end);
+    const marker = `\n\n{${sectionId}}\n`;
+
+    const newDoc = before + marker + after;
+    setDocumentContent(newDoc);
+
+    // Move cursor after inserted marker
+    setTimeout(() => {
+      textarea.focus();
+      textarea.selectionStart = start + marker.length;
+      textarea.selectionEnd = start + marker.length;
+    }, 0);
+  };
+
+  /**
+   * Upload a single image to Shopify
+   */
+  const uploadImageToShopify = async (keyword: string, file: File) => {
+    setUploadingImages((prev) => ({ ...prev, [keyword]: true }));
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("keyword", keyword);
+
+      const response = await fetch("/api/upload-image", {
+        method: "POST",
+        body: formData,
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        toast.error(`Failed to upload image for "${keyword}": ${data.error}`);
+        return;
+      }
+
+      setImageUrls((prev) => ({ ...prev, [keyword]: data.imageUrl }));
+      toast.success(`Image "${keyword}" uploaded to Shopify!`);
+    } catch (error) {
+      console.error("Error uploading image:", error);
+      toast.error(`Error uploading image: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setUploadingImages((prev) => ({ ...prev, [keyword]: false }));
+    }
+  };
+
+  /**
+   * Handle image file selection for a specific keyword
+   */
+  const handleImageFileSelect = async (
+    event: React.ChangeEvent<HTMLInputElement>,
+    keyword: string
+  ) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    await uploadImageToShopify(keyword, file);
+
+    // Reset input
+    if (imageFileInputsRef.current[keyword]) {
+      imageFileInputsRef.current[keyword].value = "";
+    }
+  };
+
+  /**
+   * Remove an uploaded image
+   */
+  const removeImage = (keyword: string) => {
+    setImageUrls((prev) => {
+      const updated = { ...prev };
+      delete updated[keyword];
+      return updated;
+    });
+    toast.success(`Image "${keyword}" removed`);
+  };
+
+  /**
+   * Upload featured/hero image to Shopify
+   */
+  const uploadFeaturedImageToShopify = async (file: File) => {
+    setFeaturedImage({ url: "", uploading: true });
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("keyword", "featured-hero");
+
+      console.log("Uploading featured image:", file.name, file.type, file.size);
+
+      const response = await fetch("/api/upload-image", {
+        method: "POST",
+        body: formData,
+      });
+
+      const responseText = await response.text();
+      console.log("Upload response status:", response.status);
+      console.log("Upload response text:", responseText);
+
+      let data;
+      try {
+        data = JSON.parse(responseText);
+      } catch {
+        toast.error("Invalid response from server");
+        setFeaturedImage(null);
+        return;
+      }
+
+      if (!response.ok) {
+        const errorMsg = data.error || "Unknown error";
+        console.error("Upload failed:", errorMsg);
+        toast.error(`Failed to upload featured image: ${errorMsg}`);
+        setFeaturedImage(null);
+        return;
+      }
+
+      if (!data.imageUrl) {
+        console.error("No imageUrl in response:", data);
+        toast.error("Image uploaded but URL not returned from server");
+        setFeaturedImage(null);
+        return;
+      }
+
+      console.log("Featured image uploaded successfully. URL:", data.imageUrl);
+      setFeaturedImage({ url: data.imageUrl, uploading: false });
+      toast.success("Featured image uploaded to Shopify!");
+    } catch (error) {
+      console.error("Error uploading featured image:", error);
+      toast.error(`Error uploading featured image: ${error instanceof Error ? error.message : String(error)}`);
+      setFeaturedImage(null);
+    }
+  };
+
+  /**
+   * Handle featured image file selection
+   */
+  const handleFeaturedImageSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    await uploadFeaturedImageToShopify(file);
+
+    // Reset input
+    if (featuredImageInputRef.current) {
+      featuredImageInputRef.current.value = "";
+    }
+  };
+
+  /**
+   * Remove featured image
+   */
+  const removeFeaturedImage = () => {
+    setFeaturedImage(null);
+    toast.success("Featured image removed");
+  };
+
+  /**
+   * Generate HTML from document
+   */
+  const generateBlogHTML = async () => {
+    if (!documentContent.trim()) {
+      toast.error("Please write some content first");
+      return;
+    }
+
+    setIsLoading(true);
+    try {
+      const payload: GenerateHTMLRequest = {
+        document: documentContent,
+        format: "document",
+        options: {
+          includeSchema: true,
+          includeImages: true,
+          imageUrls: Object.keys(imageUrls).length > 0 ? imageUrls : undefined,
+          featuredImageUrl: featuredImage?.url,
+        },
+      };
+
+      const response = await fetch("/api/generate-html", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      // Read response text first to debug
+      const responseText = await response.text();
+      console.log("Response status:", response.status);
+      console.log("Response text:", responseText);
+
+      if (!responseText) {
+        toast.error("Server returned empty response");
+        return;
+      }
+
+      let data: any;
+      try {
+        data = JSON.parse(responseText);
+      } catch {
+        console.error("Failed to parse JSON:", responseText);
+        toast.error("Server returned invalid response: " + responseText.substring(0, 100));
+        return;
+      }
+
+      // Check if images need to be uploaded first
+      if (response.status === 202 && data.requiresImageUpload) {
+        setImages(data.images || []);
+        setImageUrls({}); // Reset image URLs
+        toast.info(`Found ${data.images.length} image(s). Please upload them first.`);
+        return;
+      }
+
+      // Check for images even if validation failed (in parsed data)
+      if (data.data?.images && data.data.images.length > 0 && !response.ok) {
+        setImages(data.data.images || []);
+        setImageUrls({}); // Reset image URLs
+        setMetadata(data.metadata);
+        toast.info(
+          `Found ${data.data.images.length} image(s). Please upload them first. (Note: Document has validation warnings)`
+        );
+        return;
+      }
+
+      if (!response.ok) {
+        toast.error(data.error || data.metadata?.warnings?.[0] || "Failed to generate HTML");
+        setMetadata(data.metadata);
+        return;
+      }
+
+      setHtml(data.html);
+      setMetadata(data.metadata);
+      setImages([]); // Clear images list
+      setActiveTab("preview");
+      toast.success("Blog HTML generated successfully!");
+    } catch (error) {
+      console.error("Error:", error);
+      toast.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  /**
+   * Copy HTML to clipboard
+   */
+  const copyToClipboard = async () => {
+    try {
+      await navigator.clipboard.writeText(html);
+      toast.success("HTML copied to clipboard!");
+    } catch {
+      toast.error("Failed to copy to clipboard");
+    }
+  };
+
+  /**
+   * Download HTML as file
+   */
+  const downloadHTML = () => {
+    const element = globalThis.document.createElement("a");
+    element.setAttribute(
+      "href",
+      "data:text/html;charset=utf-8," + encodeURIComponent(html)
+    );
+    element.setAttribute("download", "blog-post.html");
+    element.style.display = "none";
+    globalThis.document.body.appendChild(element);
+    element.click();
+    globalThis.document.body.removeChild(element);
+    toast.success("HTML file downloaded!");
+  };
+
+  /**
+   * Publish to Shopify
+   */
+  const publishToShopify = async () => {
+    if (!publishData.title.trim()) {
+      toast.error("Please enter a blog title");
+      return;
+    }
+
+    // Check featured image status
+    if (!featuredImage?.url) {
+      const confirmPublish = window.confirm(
+        "No featured image has been uploaded. Do you want to publish without a featured image?"
+      );
+      if (!confirmPublish) {
+        return;
+      }
+    }
+
+    setIsPublishing(true);
+    try {
+      console.log("=== Starting Shopify Publish Process ===");
+      console.log("Title:", publishData.title);
+      console.log("Featured image URL:", featuredImage?.url || "None");
+      console.log("Document content length:", documentContent.length);
+      console.log("Related products count:", relatedProducts.length);
+      if (relatedProducts.length > 0) {
+        console.log("Related products details:", relatedProducts.map((p) => ({
+          id: p.id,
+          title: p.title,
+          handle: p.handle,
+        })));
+      }
+
+      const publishPayload = {
+        document: documentContent,
+        title: publishData.title,
+        author: publishData.author || undefined,
+        tags: publishData.tags
+          ? publishData.tags.split(",").map((t) => t.trim())
+          : undefined,
+        publicationDate: publishData.publicationDate,
+        imageUrls: Object.keys(imageUrls).length > 0 ? imageUrls : undefined,
+        featuredImageUrl: featuredImage?.url,
+        relatedProducts: relatedProducts.length > 0 ? relatedProducts : undefined,
+      };
+
+      console.log("Full publish payload:", publishPayload);
+
+      const response = await fetch("/api/publish-shopify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(publishPayload),
+      });
+
+      console.log("Publish response status:", response.status);
+
+      // Parse response body safely
+      let data: any;
+      const contentType = response.headers.get("content-type");
+
+      if (contentType?.includes("application/json")) {
+        data = await response.json();
+      } else {
+        const textContent = await response.text();
+        console.error("Server returned non-JSON response:", contentType, textContent);
+        toast.error("Server error: Invalid response format. Check browser console for details.");
+        return;
+      }
+
+      // Check if images need to be uploaded first
+      if (response.status === 202 && data.requiresImageUpload) {
+        setImages(data.images || []);
+        setImageUrls({}); // Reset image URLs
+        setShowPublishModal(false);
+        toast.info(`Found ${data.images.length} image(s). Please upload them first.`);
+        return;
+      }
+
+      if (!response.ok) {
+        const errorMessage = data.error || "Failed to publish to Shopify";
+        const details = data.details ? ` (${data.details})` : "";
+        const suggestion = data.suggestion ? ` ${data.suggestion}` : "";
+        const fullError = `${errorMessage}${details}${suggestion}`;
+
+        console.error("Publish error response:", {
+          status: response.status,
+          error: data.error,
+          details: data.details,
+          suggestion: data.suggestion,
+        });
+
+        // Special handling for featured image errors
+        if (data.error?.includes("featured image") || data.error?.includes("image")) {
+          toast.error(`Featured Image Error: ${fullError}`);
+        } else if (response.status === 401) {
+          toast.error(`Authentication Error: ${fullError}`);
+        } else if (response.status === 503) {
+          toast.error(`Connection Error: ${fullError}`);
+        } else {
+          toast.error(fullError);
+        }
+        return;
+      }
+
+      // Verify featured image was included
+      if (featuredImage?.url && !data.featuredImageIncluded) {
+        console.warn("Featured image URL was provided but may not have been included in the published article");
+      }
+
+      console.log("Article published successfully. Article ID:", data.articleId);
+      console.log("Related products count:", data.relatedProductsCount || 0);
+      console.log("Related products metafield success:", data.relatedProductsMetafieldSuccess);
+
+      // Show appropriate success message
+      let successMessage = "Published to Shopify successfully!";
+      if (relatedProducts.length > 0) {
+        if (data.relatedProductsMetafieldSuccess) {
+          successMessage += " Related products saved to metafield.";
+          toast.success(successMessage);
+        } else {
+          // Article was published, but metafield update failed
+          // Show as info/warning since article itself was published successfully
+          console.warn("Article published, but related products metafield update encountered an issue. Check server logs for details.");
+          toast.info(`Article published successfully. However, related products metafield update had an issue. The article is live but related products may not be saved. Check console for details.`);
+        }
+      } else {
+        toast.success(successMessage);
+      }
+      setShowPublishModal(false);
+      setPublishData({
+        title: "",
+        author: "",
+        tags: "",
+        publicationDate: new Date().toISOString().split("T")[0],
+      });
+      setRelatedProducts([]); // Clear selected products after publish
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.error("Error publishing:", error);
+      console.error("Error stack:", error instanceof Error ? error.stack : "N/A");
+      toast.error(`Error: ${errorMessage}`);
+    } finally {
+      setIsPublishing(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-gray-50">
+      <div className="max-w-7xl mx-auto px-4 py-8">
+        {/* Header */}
+        <div className="mb-8 flex items-center justify-between">
+          <div>
+            <h1 className="text-4xl font-bold mb-2">Blog Generator</h1>
+            <p className="text-gray-600">
+              Write content using section markers and we'll generate SEO-optimized HTML
+            </p>
+          </div>
+          <Button
+            onClick={showDiagnostics}
+            variant="outline"
+            size="sm"
+            className="gap-2 text-xs"
+            title="Troubleshoot Shopify connection issues"
+          >
+            <Settings size={16} />
+            Shopify Diagnostics
+          </Button>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
+          {/* Sidebar: Section Buttons */}
+          <div className="lg:col-span-1">
+            {/* Upload Document Card */}
+            <Card className="mb-4">
+              <CardHeader>
+                <CardTitle className="text-lg">Upload Document</CardTitle>
+                <CardDescription>Load content from a file</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".txt,.md,.docx"
+                  onChange={handleDocumentUpload}
+                  className="hidden"
+                />
+                <Button
+                  onClick={() => fileInputRef.current?.click()}
+                  variant="outline"
+                  className="w-full gap-2"
+                >
+                  <Upload size={16} />
+                  Choose File
+                </Button>
+                <p className="text-xs text-gray-500 mt-3">
+                  Supports: .txt, .md, .docx
+                </p>
+              </CardContent>
+            </Card>
+
+            {/* Featured Image Card */}
+            <Card className="mb-4">
+              <CardHeader>
+                <CardTitle className="text-lg">Featured Image</CardTitle>
+                <CardDescription>Hero/banner image for blog</CardDescription>
+              </CardHeader>
+              <CardContent>
+                {featuredImage && (featuredImage.url || featuredImage.uploading) ? (
+                  <div className="space-y-3">
+                    <div className="relative w-full aspect-video bg-gray-100 rounded-lg overflow-hidden border border-gray-200">
+                      {featuredImage.uploading ? (
+                        <div className="w-full h-full flex items-center justify-center">
+                          <div className="text-center">
+                            <p className="text-sm text-gray-600">Uploading...</p>
+                          </div>
+                        </div>
+                      ) : featuredImage.url ? (
+                        <img
+                          src={featuredImage.url}
+                          alt="Featured"
+                          className="w-full h-full object-cover"
+                          onError={(e) => {
+                            console.error("Failed to load featured image:", featuredImage.url);
+                            toast.error("Failed to load featured image from Shopify");
+                          }}
+                        />
+                      ) : (
+                        <div className="w-full h-full flex items-center justify-center">
+                          <p className="text-sm text-gray-500">No image URL returned</p>
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex gap-2">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => featuredImageInputRef.current?.click()}
+                        disabled={featuredImage.uploading}
+                        className="flex-1 gap-2"
+                      >
+                        <Edit2 size={14} />
+                        {featuredImage.uploading ? "Uploading..." : "Change"}
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={removeFeaturedImage}
+                        className="flex-1 gap-2 text-red-600 hover:text-red-700 hover:bg-red-50"
+                      >
+                        <Trash2 size={14} />
+                        Remove
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
+                  <div>
+                    <input
+                      ref={featuredImageInputRef}
+                      type="file"
+                      accept="image/jpeg,image/png,image/webp,image/gif"
+                      onChange={handleFeaturedImageSelect}
+                      className="hidden"
+                    />
+                    <Button
+                      onClick={() => featuredImageInputRef.current?.click()}
+                      variant="outline"
+                      className="w-full gap-2"
+                    >
+                      <Upload size={16} />
+                      Upload Image
+                    </Button>
+                    <p className="text-xs text-gray-500 mt-3">
+                      Supports: JPG, PNG, WebP, GIF
+                    </p>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-lg">Quick Insert</CardTitle>
+                <CardDescription>Click to insert section markers</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-2">
+                {sections.map((section) => (
+                  <Button
+                    key={section.id}
+                    variant="outline"
+                    className="w-full justify-start text-xs h-auto py-2"
+                    onClick={() => insertSection(section.id)}
+                  >
+                    <span className="font-mono text-xs mr-2">{section.id}</span>
+                    <span className="truncate">{section.name}</span>
+                  </Button>
+                ))}
+              </CardContent>
+            </Card>
+
+            {/* Info Card */}
+            <Card className="mt-4">
+              <CardHeader>
+                <CardTitle className="text-sm">Info</CardTitle>
+              </CardHeader>
+              <CardContent className="text-xs space-y-3">
+                <div>
+                  <p className="font-semibold text-gray-700">Total Sections: 12</p>
+                  <p className="text-gray-600">Each section has specific HTML rules</p>
+                </div>
+                {metadata && (
+                  <div>
+                    <p className="font-semibold text-gray-700">
+                      Words: {metadata.totalWords}
+                    </p>
+                    <p className="text-gray-600">Sections: {metadata.totalSections}</p>
+                    {metadata.warnings?.length > 0 && (
+                      <p className="text-yellow-600">
+                        ⚠️ {metadata.warnings.length} warning(s)
+                      </p>
+                    )}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+
+          {/* Main Content */}
+          <div className="lg:col-span-3">
+            {/* Tabs */}
+            <div className="flex gap-2 mb-4 border-b">
+              <button
+                onClick={() => setActiveTab("editor")}
+                className={`px-4 py-2 font-medium transition-colors ${
+                  activeTab === "editor"
+                    ? "border-b-2 border-blue-500 text-blue-600"
+                    : "text-gray-600 hover:text-gray-900"
+                }`}
+              >
+                Editor
+              </button>
+              <button
+                onClick={() => setActiveTab("preview")}
+                className={`px-4 py-2 font-medium transition-colors ${
+                  activeTab === "preview"
+                    ? "border-b-2 border-blue-500 text-blue-600"
+                    : "text-gray-600 hover:text-gray-900"
+                }`}
+              >
+                Preview
+              </button>
+            </div>
+
+            {/* Editor Tab */}
+            {activeTab === "editor" && (
+              <Card>
+                <CardContent className="p-0">
+                  <textarea
+                    ref={textareaRef}
+                    value={documentContent}
+                    onChange={(e) => setDocumentContent(e.target.value)}
+                    onPaste={handlePaste}
+                    placeholder="Write your blog content here. Use {section1}, {section2}, etc. to mark sections. You can also paste content from Word or other sources."
+                    className="w-full h-[600px] p-4 font-mono text-sm border-0 focus:ring-0 resize-none"
+                  />
+                </CardContent>
+              </Card>
+            )}
+
+            {/* Preview Tab */}
+            {activeTab === "preview" && (
+              <>
+                {html ? (
+                  <Card>
+                    <CardHeader className="flex flex-row items-center justify-between">
+                      <div>
+                        <CardTitle>Generated HTML</CardTitle>
+                        <CardDescription>
+                          Your SEO-optimized blog post
+                        </CardDescription>
+                      </div>
+                      <div className="flex gap-2 flex-wrap">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={copyToClipboard}
+                          className="gap-2"
+                        >
+                          <Copy size={16} />
+                          Copy
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={downloadHTML}
+                          className="gap-2"
+                        >
+                          <Download size={16} />
+                          Download
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={handleOpenPublishModal}
+                          className="gap-2 bg-green-50 hover:bg-green-100 text-green-700"
+                        >
+                          <Upload size={16} />
+                          Publish to Shopify
+                        </Button>
+                      </div>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="bg-gray-50 p-6 rounded-lg border border-gray-200 max-h-[500px] overflow-y-auto">
+                        <div className="prose prose-sm max-w-none">
+                          <pre className="text-xs whitespace-pre-wrap break-words bg-white p-4 rounded border">
+                            {html}
+                          </pre>
+                        </div>
+                      </div>
+                    </CardContent>
+                  </Card>
+                ) : (
+                  <Card>
+                    <CardContent className="py-12 text-center">
+                      <p className="text-gray-500">
+                        Generate HTML first to see the preview
+                      </p>
+                    </CardContent>
+                  </Card>
+                )}
+              </>
+            )}
+
+            {/* Image Upload Section */}
+            {images.length > 0 && (
+              <Card className="mt-6 border-blue-200 bg-blue-50">
+                <CardHeader>
+                  <CardTitle className="text-blue-900">Upload Images to Shopify</CardTitle>
+                  <CardDescription className="text-blue-800">
+                    Your document contains {images.length} image(s). Upload them to generate the final HTML.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  {images.map((image, idx) => (
+                    <div key={`${image.sectionId}-${image.keyword}-${idx}`} className="flex items-center justify-between p-3 bg-white rounded border border-blue-200">
+                      <div>
+                        <p className="font-medium text-gray-900">{image.keyword}</p>
+                        <p className="text-xs text-gray-600">Section: {image.sectionId}</p>
+                        {imageUrls[image.keyword] && (
+                          <p className="text-xs text-green-600 mt-1">✓ Uploaded</p>
+                        )}
+                      </div>
+                      <div className="flex gap-2">
+                        <input
+                          ref={(el) => {
+                            if (el) imageFileInputsRef.current[image.keyword] = el;
+                          }}
+                          type="file"
+                          accept="image/jpeg,image/png,image/webp,image/gif"
+                          onChange={(e) => handleImageFileSelect(e, image.keyword)}
+                          className="hidden"
+                        />
+                        {imageUrls[image.keyword] ? (
+                          <>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => imageFileInputsRef.current[image.keyword]?.click()}
+                              disabled={uploadingImages[image.keyword]}
+                              className="gap-2"
+                            >
+                              <Edit2 size={14} />
+                              {uploadingImages[image.keyword] ? "Uploading..." : "Change"}
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => removeImage(image.keyword)}
+                              className="gap-2 text-red-600 hover:text-red-700 hover:bg-red-50"
+                            >
+                              <Trash2 size={14} />
+                              Remove
+                            </Button>
+                          </>
+                        ) : (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => imageFileInputsRef.current[image.keyword]?.click()}
+                            disabled={uploadingImages[image.keyword]}
+                            className="gap-2"
+                          >
+                            <Upload size={14} />
+                            {uploadingImages[image.keyword] ? "Uploading..." : "Upload"}
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </CardContent>
+              </Card>
+            )}
+
+            {/* Generate Button */}
+            {(() => {
+              // Check if all unique image keywords are uploaded
+              const uniqueKeywords = new Set(images.map((img) => img.keyword));
+              const allImagesUploaded = images.length === 0 || [...uniqueKeywords].every((keyword) => imageUrls[keyword]);
+              return (
+                <Button
+                  onClick={generateBlogHTML}
+                  disabled={isLoading}
+                  className="w-full mt-6 h-12 gap-2 text-base font-semibold"
+                >
+                  <Zap size={18} />
+                  {isLoading ? "Generating..." : "Generate Blog HTML"}
+                </Button>
+              );
+            })()}
+
+            {/* Warnings/Errors */}
+            {metadata?.warnings?.length > 0 && (
+              <Card className="mt-6 border-yellow-200 bg-yellow-50">
+                <CardHeader>
+                  <CardTitle className="text-yellow-800">Validation Warnings</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <ul className="space-y-2 text-sm">
+                    {metadata.warnings.map((warning: string, idx: number) => (
+                      <li key={`warning-${idx}`} className="text-yellow-700 flex gap-2">
+                        <span>⚠️</span>
+                        <span>{warning}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </CardContent>
+              </Card>
+            )}
+
+            {metadata?.missingRequired?.length > 0 && (
+              <Card className="mt-6 border-red-200 bg-red-50">
+                <CardHeader>
+                  <CardTitle className="text-red-800">Missing Required Sections</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <ul className="space-y-2 text-sm">
+                    {metadata.missingRequired.map((section: string, idx: number) => (
+                      <li key={`missing-${idx}`} className="text-red-700 flex gap-2">
+                        <span>❌</span>
+                        <span>{section}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </CardContent>
+              </Card>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Shopify Publish Modal */}
+      {showPublishModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <Card className="w-full max-w-md">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Upload size={20} />
+                Publish to Shopify
+              </CardTitle>
+              <CardDescription>
+                Configure and publish your blog post to Shopify
+              </CardDescription>
+            </CardHeader>
+            <CardContent
+              className="space-y-4"
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                height: "auto",
+                flexGrow: 0,
+                minHeight: "200px",
+                maxHeight: "70vh",
+                overflowY: "auto",
+              }}
+            >
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Blog Title *
+                </label>
+                <input
+                  type="text"
+                  value={publishData.title}
+                  onChange={(e) =>
+                    setPublishData({ ...publishData, title: e.target.value })
+                  }
+                  placeholder="Enter blog post title"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Author
+                </label>
+                <input
+                  type="text"
+                  value={publishData.author}
+                  onChange={(e) =>
+                    setPublishData({ ...publishData, author: e.target.value })
+                  }
+                  placeholder="Author name (optional)"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Tags
+                </label>
+                <input
+                  type="text"
+                  value={publishData.tags}
+                  onChange={(e) =>
+                    setPublishData({ ...publishData, tags: e.target.value })
+                  }
+                  placeholder="Comma-separated tags"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Publication Date
+                </label>
+                <input
+                  type="date"
+                  value={publishData.publicationDate}
+                  onChange={(e) =>
+                    setPublishData({
+                      ...publishData,
+                      publicationDate: e.target.value,
+                    })
+                  }
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+
+              <div className="border-t pt-4">
+                <RelatedProductsField
+                  selectedProducts={relatedProducts}
+                  onChange={setRelatedProducts}
+                />
+              </div>
+
+              <div className="flex gap-2 pt-4">
+                <Button
+                  variant="outline"
+                  onClick={() => setShowPublishModal(false)}
+                  disabled={isPublishing}
+                  className="flex-1"
+                >
+                  Cancel
+                </Button>
+                <Button
+                  onClick={publishToShopify}
+                  disabled={isPublishing}
+                  className="flex-1 bg-green-600 hover:bg-green-700"
+                >
+                  {isPublishing ? "Publishing..." : "Publish"}
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+    </div>
+  );
+}
