@@ -73,6 +73,15 @@ export function createServer() {
 
   // Middleware
   app.use(cors());
+  // Workaround for serverless-http + Express 5: body arrives as a Buffer and socket is not
+  // readable, so express.json() never runs. Force readable so body-parser runs (see
+  // https://github.com/dougmoscrop/serverless-http/issues/274).
+  app.use((req, _res, next) => {
+    if (req.socket && !req.socket.readable && req.body && Buffer.isBuffer(req.body)) {
+      (req.socket as { readable?: boolean }).readable = true;
+    }
+    next();
+  });
   app.use(express.json());
   app.use(express.urlencoded({ extended: true }));
 

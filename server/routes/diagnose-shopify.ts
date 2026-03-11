@@ -1,8 +1,10 @@
 import { RequestHandler } from "express";
 
-export const handleDiagnoseShopify: RequestHandler = async (_req, res) => {
+export type ActionResult = { statusCode: number; body: object };
+
+export async function diagnoseShopifyAction(): Promise<ActionResult> {
   try {
-    const diagnostics: any = {
+    const diagnostics: Record<string, any> = {
       timestamp: new Date().toISOString(),
       status: "ok",
       issues: [],
@@ -103,12 +105,12 @@ export const handleDiagnoseShopify: RequestHandler = async (_req, res) => {
       diagnostics.status = "error";
     }
 
-    res.json(diagnostics);
+    return { statusCode: 200, body: diagnostics };
   } catch (error) {
-    res.status(500).json({
-      status: "error",
-      error: error instanceof Error ? error.message : String(error),
-      timestamp: new Date().toISOString(),
-    });
+    return { statusCode: 500, body: { status: "error", error: error instanceof Error ? error.message : String(error), timestamp: new Date().toISOString() } };
   }
+}
+
+export const handleDiagnoseShopify: RequestHandler = async (_req, res) => {
+  diagnoseShopifyAction().then((r) => res.status(r.statusCode).json(r.body));
 };

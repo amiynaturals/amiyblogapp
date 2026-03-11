@@ -1,26 +1,22 @@
 import { RequestHandler } from "express";
 
-export const handleVerifyPassword: RequestHandler = (req, res) => {
-  const { password } = req.body;
+export type ActionResult = { statusCode: number; body: object };
 
+export async function verifyPasswordAction(body: unknown): Promise<ActionResult> {
+  if (!body || typeof body !== "object") {
+    return { statusCode: 400, body: { error: "Invalid request body" } };
+  }
+  const { password } = body as { password?: string };
   if (!password) {
-    res.status(400).json({ error: "Password is required" });
-    return;
+    return { statusCode: 400, body: { error: "Password is required" } };
   }
-
   const correctPassword = process.env.APP_PASSWORD || "AmiySEO";
-
-  console.log("Password verification attempt:", {
-    provided: password,
-    expected: correctPassword,
-    match: password === correctPassword,
-    envAppPassword: process.env.APP_PASSWORD,
-    env: Object.keys(process.env).filter(k => k.startsWith('APP') || k.startsWith('SHOPIFY'))
-  });
-
   if (password === correctPassword) {
-    res.json({ success: true });
-  } else {
-    res.status(401).json({ error: "Invalid password" });
+    return { statusCode: 200, body: { success: true } };
   }
+  return { statusCode: 401, body: { error: "Invalid password" } };
+}
+
+export const handleVerifyPassword: RequestHandler = (req, res) => {
+  verifyPasswordAction(req.body).then((r) => res.status(r.statusCode).json(r.body));
 };

@@ -5,37 +5,27 @@ export interface ParseDocumentRequest {
   document: string;
 }
 
-export const handleParseDocument: RequestHandler = (req, res) => {
+export type ActionResult = { statusCode: number; body: object };
+
+export async function parseDocumentAction(body: unknown): Promise<ActionResult> {
   try {
-    const body = req.body as ParseDocumentRequest;
-
-    if (!body || !body.document) {
-      return res.status(400).json({
-        error: "Missing 'document' field in request body",
-        details: "Document must be a non-empty string",
-      });
+    const b = body as ParseDocumentRequest | undefined;
+    if (!b || !b.document) {
+      return { statusCode: 400, body: { error: "Missing 'document' field in request body", details: "Document must be a non-empty string" } };
     }
-
-    let parsed;
     try {
-      parsed = parseDocument(body.document);
+      const parsed = parseDocument(b.document);
+      return { statusCode: 200, body: { success: true, data: parsed } };
     } catch (parseError) {
       console.error("Error parsing document:", parseError);
-      return res.status(500).json({
-        error: "Failed to parse document",
-        details: parseError instanceof Error ? parseError.message : String(parseError),
-      });
+      return { statusCode: 500, body: { error: "Failed to parse document", details: parseError instanceof Error ? parseError.message : String(parseError) } };
     }
-
-    res.json({
-      success: true,
-      data: parsed,
-    });
   } catch (error) {
     console.error("Unexpected error in handleParseDocument:", error);
-    res.status(500).json({
-      error: "Failed to parse document",
-      details: error instanceof Error ? error.message : String(error),
-    });
+    return { statusCode: 500, body: { error: "Failed to parse document", details: error instanceof Error ? error.message : String(error) } };
   }
+}
+
+export const handleParseDocument: RequestHandler = (req, res) => {
+  parseDocumentAction(req.body).then((r) => res.status(r.statusCode).json(r.body));
 };

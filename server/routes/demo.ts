@@ -1,9 +1,10 @@
 import { RequestHandler } from "express";
 import { DemoResponse } from "@shared/api";
 
-export const handleDemo: RequestHandler = (req, res) => {
-  const response: DemoResponse = {
-    message: "Hello from Express server",
-  };
-  res.status(200).json(response);
+export async function demoAction(): Promise<{ statusCode: number; body: DemoResponse }> {
+  return { statusCode: 200, body: { message: "Hello from Express server" } };
+}
+
+export const handleDemo: RequestHandler = (_req, res) => {
+  demoAction().then((r) => res.status(r.statusCode).json(r.body));
 };

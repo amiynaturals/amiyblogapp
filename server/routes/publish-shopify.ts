@@ -21,12 +21,32 @@ export interface PublishShopifyRequest {
   relatedProducts?: RelatedProduct[]; // Related products to save to metafield
 }
 
+export type ActionResult = { statusCode: number; body: object };
+
+/** Run publish logic with a mock res; used by Netlify native handler. */
+export function publishShopifyAction(body: unknown): Promise<ActionResult> {
+  return new Promise((resolve, reject) => {
+    const mockRes = {
+      status: (code: number) => ({ json: (b: object) => resolve({ statusCode: code, body: b }) }),
+    };
+    Promise.resolve((handlePublishShopify as RequestHandler)({ body } as any, mockRes as any, () => {})).catch(reject);
+  });
+}
+
 export const handlePublishShopify: RequestHandler = async (req, res) => {
   try {
     console.log("=== POST /api/publish-shopify request received ===");
-    console.log("Request body keys:", Object.keys(req.body).join(", "));
 
-    const { document, title, author, tags, publicationDate, imageUrls, featuredImageUrl, relatedProducts } = req.body as PublishShopifyRequest;
+    const body = req.body as PublishShopifyRequest | undefined;
+    if (!body || typeof body !== "object") {
+      return res.status(400).json({
+        error: "Invalid request body",
+        details: "Request body must be a JSON object with 'document' and 'title'.",
+      });
+    }
+    console.log("Request body keys:", Object.keys(body).join(", "));
+
+    const { document, title, author, tags, publicationDate, imageUrls, featuredImageUrl, relatedProducts } = body;
 
     console.log("Publish parameters:");
     console.log("  - Title:", title);

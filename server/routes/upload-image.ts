@@ -12,6 +12,22 @@ export interface UploadImageResponse {
   error?: string;
 }
 
+export type ActionResult = { statusCode: number; body: object };
+
+/** Run upload logic with file + keyword; used by Netlify native handler. */
+export function uploadImageAction(
+  file: { buffer: Buffer; mimetype: string; originalname: string } | null,
+  keyword?: string
+): Promise<ActionResult> {
+  return new Promise((resolve, reject) => {
+    const mockRes = {
+      status: (code: number) => ({ json: (b: object) => resolve({ statusCode: code, body: b }) }),
+    };
+    const mockReq = { file, body: { keyword: (keyword || "image").trim() } };
+    Promise.resolve((handleUploadImage as RequestHandler)(mockReq as any, mockRes as any, () => {})).catch(reject);
+  });
+}
+
 /**
  * Handle image upload to Shopify
  * Expects multipart/form-data with:
