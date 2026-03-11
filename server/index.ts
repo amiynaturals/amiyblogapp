@@ -5,20 +5,30 @@ import express from "express";
 import cors from "cors";
 import multer from "multer";
 
-// Load environment variables from .env file
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const envPath = path.resolve(__dirname, "../.env");
-const result = dotenv.config({ path: envPath });
+// Load environment variables from .env file.
+// In some bundled environments (like Netlify Functions), import.meta.url may
+// not be defined as expected, so fall back to process.cwd().
+let envPath: string | undefined;
+const envResult = (() => {
+  try {
+    const __dirname = path.dirname(fileURLToPath(import.meta.url));
+    envPath = path.resolve(__dirname, "../.env");
+    return dotenv.config({ path: envPath });
+  } catch {
+    envPath = path.resolve(process.cwd(), ".env");
+    return dotenv.config();
+  }
+})();
 
 console.log("Dotenv loading:", {
   path: envPath,
-  parsed: result.parsed ? Object.keys(result.parsed) : [],
-  error: result.error?.message,
+  parsed: envResult.parsed ? Object.keys(envResult.parsed) : [],
+  error: envResult.error?.message,
 });
 
 // Ensure all parsed variables are available in process.env
-if (result.parsed) {
-  for (const [key, value] of Object.entries(result.parsed)) {
+if (envResult.parsed) {
+  for (const [key, value] of Object.entries(envResult.parsed)) {
     if (!process.env[key]) {
       process.env[key] = value;
     }
