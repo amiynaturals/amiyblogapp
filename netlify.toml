@@ -5,7 +5,7 @@
 
 
 [functions]
-  external_node_modules = ["express"]
+  # Don't externalize express — bundle it so it's available at runtime (avoids "Cannot find module 'express'" with pnpm/Netlify)
   node_bundler = "esbuild"
   
 [[redirects]]
