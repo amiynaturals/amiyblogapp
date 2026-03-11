@@ -1,5 +1,6 @@
 import { RequestHandler } from "express";
 import { getShopifyClient } from "../services/shopify-client.js";
+import { createMockRes, type ActionResult } from "../mock-res.js";
 
 export interface UploadImageRequest {
   keyword: string;
@@ -12,7 +13,7 @@ export interface UploadImageResponse {
   error?: string;
 }
 
-export type ActionResult = { statusCode: number; body: object };
+export type { ActionResult };
 
 /** Run upload logic with file + keyword; used by Netlify native handler. */
 export function uploadImageAction(
@@ -20,9 +21,7 @@ export function uploadImageAction(
   keyword?: string
 ): Promise<ActionResult> {
   return new Promise((resolve, reject) => {
-    const mockRes = {
-      status: (code: number) => ({ json: (b: object) => resolve({ statusCode: code, body: b }) }),
-    };
+    const mockRes = createMockRes(resolve, reject);
     const mockReq = { file, body: { keyword: (keyword || "image").trim() } };
     Promise.resolve((handleUploadImage as RequestHandler)(mockReq as any, mockRes as any, () => {})).catch(reject);
   });

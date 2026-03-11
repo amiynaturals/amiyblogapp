@@ -1,4 +1,5 @@
 import { RequestHandler } from "express";
+import { createMockRes, type ActionResult } from "../mock-res.js";
 import { parseDocument } from "../services/document-parser.js";
 import { generateStyledHTML } from "../services/html-generator.js";
 import { getShopifyClient } from "../services/shopify-client.js";
@@ -21,14 +22,12 @@ export interface PublishShopifyRequest {
   relatedProducts?: RelatedProduct[]; // Related products to save to metafield
 }
 
-export type ActionResult = { statusCode: number; body: object };
+export type { ActionResult };
 
 /** Run publish logic with a mock res; used by Netlify native handler. */
 export function publishShopifyAction(body: unknown): Promise<ActionResult> {
   return new Promise((resolve, reject) => {
-    const mockRes = {
-      status: (code: number) => ({ json: (b: object) => resolve({ statusCode: code, body: b }) }),
-    };
+    const mockRes = createMockRes(resolve, reject);
     Promise.resolve((handlePublishShopify as RequestHandler)({ body } as any, mockRes as any, () => {})).catch(reject);
   });
 }
